@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
  */
 
+/* Note: Many functions here are not used
+*  as this is a modified template.
+*/
+
 #include <zephyr/types.h>
 #include <stddef.h>
 #include <string.h>
@@ -59,14 +63,14 @@
 /* HIDs queue size. */
 #define HIDS_QUEUE_SIZE 10
 
-/* Key used to move cursor left */
-#define KEY_LEFT_MASK   DK_BTN1_MSK
-/* Key used to move cursor up */
-#define KEY_UP_MASK     DK_BTN2_MSK
-/* Key used to move cursor right */
-#define KEY_RIGHT_MASK  DK_BTN3_MSK
-/* Key used to move cursor down */
-#define KEY_DOWN_MASK   DK_BTN4_MSK
+/* Mouse 1 latch*/
+#define KEY_MOUSE_BTN_MASK DK_BTN1_MSK
+
+/* Latching bool for mouse 1*/
+static bool mouse_btn_latched = false;
+
+/* RTOS work queue for latching mouse 1*/
+static struct k_work btn_work;
 
 /* Key used to accept or reject passkey value */
 #define KEY_PAIRING_ACCEPT DK_BTN1_MSK
@@ -574,6 +578,44 @@ static void mouse_handler(struct k_work *work)
 	}
 }
 
+/* Function to send mouse 1 latching state*/
+static void mouse_button_send(uint8_t button_state) 
+{
+	for (size_t i = 0; i < CONFIG_BT_HIDS_MAX_CLIENT_COUNT; i++){
+		if (!conn_mode[i].conn) {
+			continue;
+		}
+		if (conn_mode[i].in_boot_mode) { /*If client is in boot or BIOS*/
+			bt_hids_boot_mouse_inp_rep_send(&hids_obj,
+											conn_mode[i].conn,
+											&button_state,
+											0, 0, NULL);
+		} else {
+			/*
+			* The client expects 3 bytes for buttons:
+			* In the buffer, since we only want left 
+			* click we occupy the [0] byte.
+			*/
+			uint8_t buffer[INPUT_REP_BUTTONS_LEN] = {0};
+			buffer[0] = button_state;
+			/*Send that 3 bytes containing the sate of the left mouse click*/
+			bt_hids_inp_rep_send(&hids_obj, conn_mode[i].conn,
+								INPUT_REP_BUTTONS_INDEX,
+								buffer, sizeof(buffer), NULL);
+		}
+	}
+}
+
+/* Work handler for when button is pressed, for the function above*/
+static void btn_handler(struct k_work *work)
+{
+	/* Bit 0 is left click, if latched (true), send 0x01, if unlatched (flase), send 0x00*/
+	uint8_t state = mouse_btn_latched ? 0x01 : 0x00;
+	/*Give it to the send function*/
+	mouse_button_send(state);
+
+}
+
 #if defined(CONFIG_BT_HIDS_SECURITY_ENABLED)
 static void auth_passkey_display(struct bt_conn *conn, unsigned int passkey)
 {
@@ -693,14 +735,10 @@ static void num_comp_reply(bool accept)
 	}
 }
 
-
+/* Button changed get's used from a hardware intterupt*/
 void button_changed(uint32_t button_state, uint32_t has_changed)
 {
-	bool data_to_send = false;
-	struct mouse_pos pos;
 	uint32_t buttons = button_state & has_changed;
-
-	memset(&pos, 0, sizeof(struct mouse_pos));
 
 	if (IS_ENABLED(CONFIG_BT_HIDS_SECURITY_ENABLED)) {
 		if (k_msgq_num_used_get(&mitm_queue)) {
@@ -718,39 +756,17 @@ void button_changed(uint32_t button_state, uint32_t has_changed)
 		}
 	}
 
-	if (buttons & KEY_LEFT_MASK) {
-		pos.x_val -= MOVEMENT_SPEED;
-		printk("%s(): left\n", __func__);
-		data_to_send = true;
-	}
-	if (buttons & KEY_UP_MASK) {
-		pos.y_val -= MOVEMENT_SPEED;
-		printk("%s(): up\n", __func__);
-		data_to_send = true;
-	}
-	if (buttons & KEY_RIGHT_MASK) {
-		pos.x_val += MOVEMENT_SPEED;
-		printk("%s(): right\n", __func__);
-		data_to_send = true;
-	}
-	if (buttons & KEY_DOWN_MASK) {
-		pos.y_val += MOVEMENT_SPEED;
-		printk("%s(): down\n", __func__);
-		data_to_send = true;
+	/* Check if our target button was pressed */
+	if ((has_changed & KEY_MOUSE_BTN_MASK) && (button_state & KEY_MOUSE_BTN_MASK)) {
+		/* Toggle the latched state */
+		mouse_btn_latched = !mouse_btn_latched;
+		printk("Mouse 1 Latched State: %d\n", mouse_btn_latched);
+
+		/*Submit work as a k_work*/
+		/*To actually send the new state of button 1*/
+		k_work_submit(&btn_work);
 	}
 
-	if (data_to_send) {
-		int err;
-
-		err = k_msgq_put(&hids_queue, &pos, K_NO_WAIT);
-		if (err) {
-			printk("No space in the queue for button pressed\n");
-			return;
-		}
-		if (k_msgq_num_used_get(&hids_queue) == 1) {
-			k_work_submit(&hids_work);
-		}
-	}
 }
 
 
@@ -811,6 +827,7 @@ int main(void)
 	printk("Bluetooth initialized\n");
 
 	k_work_init(&hids_work, mouse_handler);
+	k_work_init(&btn_work, btn_handler);
 	k_work_init(&adv_work, advertising_process);
 	if (IS_ENABLED(CONFIG_BT_HIDS_SECURITY_ENABLED)) {
 		k_work_init(&pairing_work, pairing_process);
