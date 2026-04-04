@@ -1,5 +1,5 @@
 # Latching_Mouse_One_With_nRF52840DK
-This coed base takes the peripherals_hids_mouse (BLE) code template. Modifies it to make button 1 on the DK as a latching mouse one button for the connected client.
+This code base takes the peripherals_hids_mouse (BLE) code template. Modifies it to make button 1 on the DK as a latching mouse one button for the connected client.
 
 ## Why?
 
