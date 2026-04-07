@@ -63,11 +63,13 @@
 /* HIDs queue size. */
 #define HIDS_QUEUE_SIZE 10
 
-/* Mouse 1 latch*/
-#define KEY_MOUSE_BTN_MASK DK_BTN1_MSK
+/* Mouse 1 (Left) and Mouse 2 (Right) latches */
+#define KEY_MOUSE_LEFT_MASK  DK_BTN1_MSK
+#define KEY_MOUSE_RIGHT_MASK DK_BTN2_MSK
 
-/* Latching bool for mouse 1*/
-static bool mouse_btn_latched = false;
+/* Latching bools for mouse buttons */
+static bool mouse_left_btn_latched = false;
+static bool mouse_right_btn_latched = false;
 
 /* RTOS work queue for latching mouse 1*/
 static struct k_work btn_work;
@@ -609,9 +611,18 @@ static void mouse_button_send(uint8_t button_state)
 /* Work handler for when button is pressed, for the function above*/
 static void btn_handler(struct k_work *work)
 {
-	/* Bit 0 is left click, if latched (true), send 0x01, if unlatched (flase), send 0x00*/
-	uint8_t state = mouse_btn_latched ? 0x01 : 0x00;
-	/*Give it to the send function*/
+	// pre-define state
+	uint8_t state = 0x00;
+
+	/* If state is 0x01 = Left click, check with or "|="*/
+	if (mouse_left_btn_latched) {
+		state |= 0x01;
+	}
+	/* If state is 0x02 = Right click*/
+	if (mouse_right_btn_latched){
+		state |= 0x02;
+	}
+
 	mouse_button_send(state);
 
 }
@@ -756,17 +767,24 @@ void button_changed(uint32_t button_state, uint32_t has_changed)
 		}
 	}
 
-	/* Check if our target button was pressed */
-	if ((has_changed & KEY_MOUSE_BTN_MASK) && (button_state & KEY_MOUSE_BTN_MASK)) {
-		/* Toggle the latched state */
-		mouse_btn_latched = !mouse_btn_latched;
-		printk("Mouse 1 Latched State: %d\n", mouse_btn_latched);
+	/*Check if left button, btn1, was pressed*/
+	if ((has_changed & KEY_MOUSE_LEFT_MASK) && (button_state & KEY_MOUSE_LEFT_MASK)) {
+		/* Toggle the latched state*/
+		mouse_left_btn_latched = !mouse_left_btn_latched;
+		printk("Mouse left (1) latched state: %d\n", mouse_left_btn_latched);
 
 		/*Submit work as a k_work*/
-		/*To actually send the new state of button 1*/
 		k_work_submit(&btn_work);
 	}
+	/*Now check if right button, btn2, was pressed*/
+	if ((has_changed & KEY_MOUSE_RIGHT_MASK) && (button_state & KEY_MOUSE_RIGHT_MASK)) {
+		/* Toggle the latched (right mouse) state*/
+		mouse_right_btn_latched = !mouse_right_btn_latched;
+		printk("Mouse right (2) latched state: %d\n", mouse_right_btn_latched);
 
+		/*Submit work as a k_work*/
+		k_work_submit(&btn_work);
+	}
 }
 
 
