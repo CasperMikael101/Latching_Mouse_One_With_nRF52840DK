@@ -63,16 +63,17 @@
 /* HIDs queue size. */
 #define HIDS_QUEUE_SIZE 10
 
-/* Mouse 1 (Left) and Mouse 2 (Right) latches */
-#define KEY_MOUSE_LEFT_MASK  DK_BTN1_MSK
-#define KEY_MOUSE_RIGHT_MASK DK_BTN2_MSK
-
 /* Latching bools for mouse buttons */
-static bool mouse_left_btn_latched = false;
-static bool mouse_right_btn_latched = false;
+static bool mode_1 = true;
+static bool left_click_latched = false;
+static bool right_click_latched = false;
+static uint8_t current_battery = 100;
 
 /* RTOS work queue for latching mouse 1*/
 static struct k_work btn_work;
+static struct k_work vol_up_press_work;
+static struct k_work vol_up_release_work;
+static struct k_work bat_work;
 
 /* Key used to accept or reject passkey value */
 #define KEY_PAIRING_ACCEPT DK_BTN1_MSK
@@ -608,6 +609,35 @@ static void mouse_button_send(uint8_t button_state)
 	}
 }
 
+/*This function sends the volume up signale, given by "control_byte"*/
+static void cc_send(uint8_t control_byte)
+{
+	for (size_t i = 0; i < CONFIG_BT_HIDS_MAX_CLIENT_COUNT; i++) {
+		if(!conn_mode[i].conn){
+			continue;
+		}
+		if(!conn_mode[i].in_boot_mode){
+			uint8_t buffer[INPUT_REP_MEDIA_PLAYER_LEN] = {0};
+			buffer[0] = control_byte;
+			bt_hids_inp_rep_send(&hids_obj, conn_mode[i].conn,
+								INPUT_REP_MPLAYER_INDEX,
+								buffer, sizeof(buffer), NULL);
+
+		}
+	}
+}
+
+/* Work handler for volume up press and release handlers*/
+static void vol_up_press_handler(struct k_work *work)
+{
+	cc_send(0x20); // hex 20 corresponds to bit 5 = volume Up on iOS
+}
+
+static void vol_up_release_handler(struct k_work *work)
+{
+	cc_send(0x00); // Clears all pressed keys (release)
+}
+
 /* Work handler for when button is pressed, for the function above*/
 static void btn_handler(struct k_work *work)
 {
@@ -615,16 +645,22 @@ static void btn_handler(struct k_work *work)
 	uint8_t state = 0x00;
 
 	/* If state is 0x01 = Left click, check with or "|="*/
-	if (mouse_left_btn_latched) {
+	if (left_click_latched) {
 		state |= 0x01;
 	}
 	/* If state is 0x02 = Right click*/
-	if (mouse_right_btn_latched){
+	if (right_click_latched){
 		state |= 0x02;
 	}
 
 	mouse_button_send(state);
 
+}
+
+/* Battery work handler so that the code can manipulate the reported level*/
+static void bat_handler(struct k_work *work)
+{
+	bt_bas_set_battery_level(current_battery);
 }
 
 #if defined(CONFIG_BT_HIDS_SECURITY_ENABLED)
@@ -746,6 +782,8 @@ static void num_comp_reply(bool accept)
 	}
 }
 
+//continue here
+
 /* Button changed get's used from a hardware intterupt*/
 void button_changed(uint32_t button_state, uint32_t has_changed)
 {
@@ -767,23 +805,87 @@ void button_changed(uint32_t button_state, uint32_t has_changed)
 		}
 	}
 
-	/*Check if left button, btn1, was pressed*/
-	if ((has_changed & KEY_MOUSE_LEFT_MASK) && (button_state & KEY_MOUSE_LEFT_MASK)) {
-		/* Toggle the latched state*/
-		mouse_left_btn_latched = !mouse_left_btn_latched;
-		printk("Mouse left (1) latched state: %d\n", mouse_left_btn_latched);
+	/*	The new feature has two modes:
+		- Mode 1: Which is left and right mouse click latch
+		- Not mode 1: Battery percentage manipulation and (iOS) shutter button
+	*/
 
-		/*Submit work as a k_work*/
-		k_work_submit(&btn_work);
+	/* Button Mapping, "DK_BTN{...}_MSK" :
+		[1]  [2]
+		 *	  *
+
+		[3]  [4]
+		 *    *
+	*/
+
+	/* BTN1: Mode toggle and initial initialization, handle first*/
+	if ((has_changed & DK_BTN1_MSK) && (button_state & DK_BTN1_MSK)){
+		mode_1 = !mode_1;
+		if (mode_1){
+			dk_set_led_on(DK_LED1); //indicate mode 1 is on with led1
+			dk_set_led(DK_LED3, left_click_latched); //restore led state
+			dk_set_led(DK_LED4, right_click_latched); //restore led state
+			dk_set_led_off(DK_LED2);
+		} else {
+			//when not mode 1 & turn off leds
+			dk_set_led_off(DK_LED1);
+			dk_set_led_off(DK_LED3);
+			dk_set_led_off(DK_LED4);
+		}
+		/*continue the function*/
+		return;
 	}
-	/*Now check if right button, btn2, was pressed*/
-	if ((has_changed & KEY_MOUSE_RIGHT_MASK) && (button_state & KEY_MOUSE_RIGHT_MASK)) {
-		/* Toggle the latched (right mouse) state*/
-		mouse_right_btn_latched = !mouse_right_btn_latched;
-		printk("Mouse right (2) latched state: %d\n", mouse_right_btn_latched);
 
-		/*Submit work as a k_work*/
-		k_work_submit(&btn_work);
+	/*Button logic*/
+	if (mode_1){
+		/* BTN3 pressed = left click latch*/
+		if ((has_changed & DK_BTN3_MSK) && (button_state & DK_BTN3_MSK)) {
+			left_click_latched = !left_click_latched; //latching boolean
+			dk_set_led(DK_LED3, left_click_latched); //led state
+			k_work_submit(&btn_work); //place on work queue 
+		}
+		/* BTN4 pressed = right click latch*/
+		if ((has_changed & DK_BTN4_MSK) && (button_state & DK_BTN4_MSK)) {
+			right_click_latched = !right_click_latched;
+			dk_set_led(DK_LED4, right_click_latched);
+			k_work_submit(&btn_work);
+		}
+	} else { //when not in mode 1
+		/* BTN2 pressed = camera shutter; press and release*/
+		if (has_changed & DK_BTN2_MSK) {
+			if (button_state & DK_BTN2_MSK) {
+				dk_set_led_on(DK_LED2);
+				k_work_submit(&vol_up_press_work);
+			} else {
+				/* Button release*/
+				dk_set_led_off(DK_LED2);
+				k_work_submit(&vol_up_release_work);
+			}
+		}
+		/* BTN3 pressed = battery decrement */
+		if (has_changed & DK_BTN3_MSK) {
+			if (button_state & DK_BTN3_MSK) {
+				dk_set_led_on(DK_LED3);
+				if (current_battery > 0) { //keep range 0≤bat≤100
+					current_battery-=10;
+				}
+				k_work_submit(&bat_work);
+			} else {
+				dk_set_led_off(DK_LED3); //turn off led
+			}
+		}
+		/* BTN4 pressed = battery increment*/
+		if (has_changed & DK_BTN4_MSK) {
+			if (button_state & DK_BTN4_MSK) {   
+				dk_set_led_on(DK_LED4);
+				if (current_battery < 100) {
+					current_battery+=10;
+				}
+				k_work_submit(&bat_work);
+			} else {                     
+				dk_set_led_off(DK_LED4);
+			}
+		}
 	}
 }
 
@@ -796,22 +898,12 @@ void configure_buttons(void)
 	if (err) {
 		printk("Cannot init buttons (err: %d)\n", err);
 	}
-}
 
-
-static void bas_notify(void)
-{
-	uint8_t battery_level = bt_bas_get_battery_level();
-
-	battery_level--;
-
-	if (!battery_level) {
-		battery_level = 100U;
+	err = dk_leds_init();
+	if (err) {
+		printk("Cannot init LEDs (err: %d)\n",err);
 	}
-
-	bt_bas_set_battery_level(battery_level);
 }
-
 
 int main(void)
 {
@@ -846,6 +938,9 @@ int main(void)
 
 	k_work_init(&hids_work, mouse_handler);
 	k_work_init(&btn_work, btn_handler);
+	k_work_init(&vol_up_press_work, vol_up_press_handler);
+	k_work_init(&vol_up_release_work, vol_up_release_handler);
+	k_work_init(&bat_work, bat_handler);
 	k_work_init(&adv_work, advertising_process);
 	if (IS_ENABLED(CONFIG_BT_HIDS_SECURITY_ENABLED)) {
 		k_work_init(&pairing_work, pairing_process);
@@ -859,9 +954,8 @@ int main(void)
 
 	configure_buttons();
 
+	dk_set_led_on(DK_LED1); // Device should start in mode 1
 	while (1) {
 		k_sleep(K_SECONDS(1));
-		/* Battery level simulation */
-		bas_notify();
 	}
 }
